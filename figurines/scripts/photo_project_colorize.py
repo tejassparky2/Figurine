@@ -230,6 +230,29 @@ def main():
                     help="faces turned HEX by the photo against the texture survive only in "
                          "pieces of <=N faces that touch the darkest slot (keeps eye whites, "
                          "drops forehead shine)")
+    ap.add_argument("--window-only", action="append", default=[], metavar="#HEX",
+                    help="this slot may come from the photo only inside --trust-photo windows "
+                         "(give it an unreachable texture anchor such as #FF00FF too)")
+    ap.add_argument("--trust-photo", action="append", default=[], metavar="X0,Y0,X1,Y1",
+                    help="photo px box where the photo's label wins outright (eyes, lips)")
+    ap.add_argument("--trust-black-chroma", type=float, default=25,
+                    help="black chroma gate inside trusted windows (dark-brown irises ~C 10-20)")
+    ap.add_argument("--despeckle", type=int, default=0, metavar="N",
+                    help="merge islands of <= N faces (any slot but black / window-only, unless the photo "
+                         "supports them) into the "
+                         "slot that surrounds them; cleans flecks in glasses frames and beards")
+    ap.add_argument("--despeckle-black", type=int, default=0, metavar="N",
+                    help="same for black islands, with its own (small) limit so pupils survive")
+    ap.add_argument("--despeckle-photo-protect", action="store_true",
+                    help="keep islands the photo agrees with. Off by default: on family-of-3 the "
+                         "photo's own shine 'supported' white flecks in a beard and blue flecks in hair")
+    ap.add_argument("--despeckle-share", type=float, default=0.6,
+                    help="island must be bordered at least this much by one slot")
+    ap.add_argument("--stamp", action="append", default=[], metavar="#HEX@X,Y,R",
+                    help="dot of HEX, radius R mm, at photo pixel X,Y (kumkum, mole); optional 4th "
+                         "number = bump-snap radius in mm for this stamp (0 = no snap, e.g. eyes)")
+    ap.add_argument("--stamp-snap", type=float, default=1.5,
+                    help="mm radius to search for the sculpted bump a stamp snaps onto")
     ap.add_argument("--obj", action="store_true", help="also write OBJ+MTL")
     ap.add_argument("--blender", help="path to blender (default: on PATH)")
     ap.add_argument("--debug-dir", help="write registration overlay + source masks here")
@@ -335,7 +358,33 @@ def main():
         swap = ((plab == a) & (tl == b)) | ((plab == b) & (tl == a))
         plab = np.where(swap, tl, plab)
         print(f"Texture decides {spec}: {int(swap.sum()):,} photo verts deferred to texture")
+    # slots that may come from the photo ONLY inside --trust-photo windows (e.g. red: lips and
+    # kumkum are wanted, but shaded skin or dad's lips must not drift into red elsewhere)
+    for hexc in args.window_only:
+        t = slot_of(palette, hexc)
+        plab = np.where(plab == t, tl, plab)
     vlabel[use_photo] = plab
+
+    # photo-trusted windows (photo px boxes, e.g. around eyes and lips): there the photo's own
+    # label wins outright — no texture-decides, no flow forward-backward veto. Use only for small
+    # features the texture gets wrong (baby's irises, lip colour).
+    trusted = np.zeros(len(V), bool)
+    if args.trust_photo:
+        if args.no_flow:
+            sys.exit("--trust-photo needs the flow alignment")
+        win_ok = seen & ((-N[:, 1]) > 0.2) & inner[ri, ci]
+        for spec in args.trust_photo:
+            x0, y0, x1, y1 = map(float, spec.split(","))
+            inw = win_ok & (cc >= x0) & (cc <= x1) & (rr >= y0) & (rr <= y1)
+            if inw.any():
+                pc = bilinear(photo, cc[inw], rr[inw])
+                vlabel[inw] = snap(pc, palette, args.color_space, args.luma_weight,
+                                   args.trust_black_chroma)
+                trusted |= inw
+            got = np.bincount(vlabel[inw], minlength=len(palette)) if inw.any() else []
+            print(f"Trust photo [{spec}]: {int(inw.sum()):,} verts -> "
+                  + ", ".join(f"{rgb_to_hex(palette[i])}:{n}" for i, n in enumerate(got) if n))
+    photo_set = use_photo | trusted
 
     # a colour the photo only shows in one place (baby's light-blue sleeves) must not appear on
     # hidden surfaces far from there: that is the texture inventing it (Tripo painted a grey
@@ -344,8 +393,8 @@ def main():
     for spec in args.hidden_near:
         hexc, _, r_s = spec.partition("=")
         t, rad = slot_of(palette, hexc), float(r_s)
-        seen_t = V[use_photo & (vlabel == t)]
-        cand = (~use_photo) & (vlabel == t)
+        seen_t = V[photo_set & (vlabel == t)]
+        cand = (~photo_set) & (vlabel == t)
         if not cand.any():
             continue
         far = cand.copy()
@@ -428,6 +477,76 @@ def main():
                 to_feature(fv, args.color_space, args.luma_weight),
                 to_feature(palette[keep], args.color_space, args.luma_weight))]
         print(f"Opening {hexc} radius {n_s}: removed {int(gone.sum())} faces")
+
+    # despeckle: small islands (<= N faces) of any slot except the black one and window-only
+    # slots, mostly surrounded (>= --despeckle-share) by ONE other slot, take that slot. This is
+    # what cleans light/skin flecks out of glasses frames and beards (texture highlights) without
+    # touching pupils or a mole (black is exempt) or trusted-window features.
+    if args.despeckle or args.despeckle_black:
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        adj = mesh.face_adjacency
+        ftrust = trusted[F].sum(1) >= 2
+        black = black_slot(palette)
+        exempt = {slot_of(palette, h) for h in args.window_only}
+        for npass in range(3):  # merging one fleck can leave its neighbour fully enclosed
+            # an island the PHOTO agrees with (overall buttons) is a feature, not a fleck;
+            # texture-highlight flecks (beard, glasses frames) have no photo support
+            fsup = photo_set[F].sum(1) >= 2
+            fsup &= (vlabel[F] == face_idx[:, None]).sum(1) >= 2
+            same = face_idx[adj[:, 0]] == face_idx[adj[:, 1]]
+            e = adj[same]
+            g = coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])), shape=(len(F), len(F)))
+            ncomp, comp = connected_components(g, directed=False)
+            size = np.bincount(comp, minlength=ncomp)
+            clabel = np.zeros(ncomp, np.int64)
+            clabel[comp] = face_idx
+            cprot = np.zeros(ncomp, bool)
+            cprot[comp[ftrust]] = True
+            if args.despeckle_photo_protect:
+                supp = np.bincount(comp, weights=fsup.astype(float), minlength=ncomp)
+                cprot |= supp >= 0.5 * size
+            border = np.zeros((ncomp, len(palette)), np.int64)
+            d = adj[~same]
+            for a, b in ((d[:, 0], d[:, 1]), (d[:, 1], d[:, 0])):
+                np.add.at(border, (comp[a], face_idx[b]), 1)
+            tot = border.sum(1)
+            top = border.argmax(1)
+            share = border.max(1) / np.maximum(tot, 1)
+            limit = np.where(clabel == black, args.despeckle_black, args.despeckle)
+            small = (size <= limit) & ~cprot & (tot > 0) & (share >= args.despeckle_share)
+            small &= ~np.isin(clabel, list(exempt))
+            moved = small[comp]
+            face_idx[moved] = top[comp[moved]]
+            print(f"Despeckle pass {npass + 1} (<= {args.despeckle} faces, black <= "
+                  f"{args.despeckle_black}): {int(small.sum()):,} islands, {int(moved.sum()):,} faces "
+                  f"merged; {int((cprot & (size <= limit) & (share >= args.despeckle_share)).sum())} "
+                  f"small islands kept as photo-supported/trusted")
+            if not moved.any():
+                break
+
+    # stamps: a dot of one slot at a photo point — kumkum/bindi, a mole. The dot is centred on
+    # the vertex whose flow-aligned photo position is nearest, then snapped to the local bump
+    # peak (the model usually sculpts a bindi), and covers r mm of surface facing the same way.
+    for spec in args.stamp:
+        if args.no_flow:
+            sys.exit("--stamp needs the flow alignment")
+        hexc, _, rest = spec.partition("@")
+        nums = list(map(float, rest.split(",")))
+        x, y, r = nums[:3]
+        snap_mm = nums[3] if len(nums) > 3 else args.stamp_snap
+        t = slot_of(palette, hexc)
+        cand = np.flatnonzero(seen & ((-N[:, 1]) > 0.2))
+        i0 = cand[np.argmin((cc[cand] - x) ** 2 + (rr[cand] - y) ** 2)]
+        near = np.flatnonzero(np.linalg.norm(V - V[i0], axis=1) < snap_mm) if snap_mm > 0 else []
+        n0 = N[near].mean(0)
+        n0 /= np.linalg.norm(n0)
+        ic = near[np.argmax((V[near] - V[near].mean(0)) @ n0)] if len(near) > 3 else i0
+        sel = (np.linalg.norm(V - V[ic], axis=1) <= r) & (N @ N[ic] > 0.3)
+        fsel = sel[F].sum(1) >= 2
+        face_idx[fsel] = t
+        print(f"Stamp {hexc} at photo ({x:.0f},{y:.0f}) r={r}mm: centre moved "
+              f"{np.linalg.norm(V[ic] - V[i0]):.2f}mm onto bump, {int(fsel.sum())} faces")
 
     counts = np.bincount(face_idx, minlength=len(palette))
     print("Face distribution per color:")
