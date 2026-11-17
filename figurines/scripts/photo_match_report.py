@@ -73,6 +73,8 @@ def main():
     ap.add_argument("--photo", required=True)
     ap.add_argument("-o", "--output", required=True)
     ap.add_argument("--json")
+    ap.add_argument("--min-px", type=int, default=800,
+                    help="a filament's colour is only re-measured with at least this many agreeing pixels")
     ap.add_argument("--write-matched", metavar="OUT.3mf",
                     help="also write a copy of the model whose filament colours are replaced by the photo's "
                          "median colour for each filament (labels untouched); updates a sibling .mtl too")
@@ -119,7 +121,13 @@ def main():
         m = inside & (Lw == k)
         if not m.any():
             continue
-        med = np.median(photo[m], 0)
+        # measure the filament's photo colour only where photo and model AGREE, so pixels a 1-2 px
+        # misalignment puts on the wrong side of an edge (skin next to hair) can't pollute it
+        ma = m & agree
+        med = np.median(photo[ma], 0) if ma.sum() >= a.min_px else None
+        if med is None:
+            print(f"{pal[k]:9s} {int(m.sum()):8,d}  only {int(ma.sum())} agreeing px - too few to measure, kept")
+            continue
         de = float(deltaE_ciede2000(rgb2lab(med[None, None] / 255.0), pal_lab[k][None, None]).item())
         conf = np.bincount(Lp[m], minlength=K); conf[k] = 0
         cw = int(conf.argmax()); cp = 100 * conf[cw] / m.sum()

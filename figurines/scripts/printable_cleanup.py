@@ -99,7 +99,7 @@ def main():
     C = mesh.triangles_center
     report("before", lab, adj, area, pal, a.min_area)
 
-    # 1. opening per colour, in mm
+    # 1. opening per colour, in mm (skip with --min-width 0, e.g. after a deliberate face-paint pass)
     r = a.min_width / 2.0
     edge = float(np.median(mesh.edges_unique_length))
     border = np.zeros(len(lab), bool)
@@ -107,7 +107,7 @@ def main():
     border[adj[diff, 0]] = True
     border[adj[diff, 1]] = True
     kill = np.zeros(len(lab), bool)
-    for c in range(k):
+    for c in range(k if r > 0 else 0):
         mask = lab == c
         if not mask.any():
             continue
