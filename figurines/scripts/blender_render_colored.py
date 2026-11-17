@@ -76,13 +76,13 @@ def sun(name, travel, strength, angle_deg):
 
 
 # light travel directions (camera sits at -Y looking +Y)
-sun("key", (0.45, 0.75, -0.55), 1.7, 25)    # from front-top-left
-sun("fill", (-0.6, 0.7, -0.15), 0.5, 40)    # from front-right, low
+sun("key", (0.45, 0.75, -0.55), 2.6, 25)    # from front-top-left
+sun("fill", (-0.6, 0.7, -0.15), 0.9, 40)    # from front-right, low
 sun("rim", (0.0, -0.6, -0.8), 0.8, 20)      # from behind-top, for edge separation
 world = bpy.data.worlds.new("w")
 world.use_nodes = True
 world.node_tree.nodes["Background"].inputs[0].default_value = (1, 1, 1, 1)
-world.node_tree.nodes["Background"].inputs[1].default_value = 0.22
+world.node_tree.nodes["Background"].inputs[1].default_value = 0.38
 scene.world = world
 
 scene.render.engine = "CYCLES"
