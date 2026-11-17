@@ -236,6 +236,8 @@ Path("output.png").write_bytes(resp.content)
 | `segment_paint_3mf.py` | Tripo3D v3 | Block colouring: one flat filament colour per geometric part, no shading bleed |
 | `colorgroup_to_painted.py` | — (local) | Bridge: bare colorgroup 3MF → real Bambu project with `paint_color`. Required before `split_painted_3mf.py` |
 | `verify_3mf.py` | — (local) | Structural check: zip order, `<build>` items, independent load, geometry, filaments. Run before every handoff |
+| `photo_project_colorize.py` | — (local + Blender) | Colours from the approved photo itself (flow-aligned projection), texture fallback where the photo can't see. EXP-024 |
+| `blender_visibility.py` / `blender_render_colored.py` | Blender (headless) | Exact front visibility via BVH ray cast / photoreal PLA render beside the photo |
 
 ## Render Styles (`-s` flag)
 

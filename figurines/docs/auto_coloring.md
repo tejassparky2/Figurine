@@ -736,6 +736,36 @@ Tunables: `--head-line` (hair/clothes height split), `--skin-min-r`, `--hair-dar
 - **Decision:** `--open` shipped in `colorize_3mf.py`. Reach for it on any glossy source art —
   which is all of the `pixar-figurine-render` output, so expect it on most human models.
 
+### EXP-024 — projecting the approved photo onto the mesh; optical flow is mandatory  (2026-11-17)
+
+- **Ask (user):** colours "perfect to the photo". Subject: family-of-3 bust, two **Meshy** GLBs
+  (not Tripo). Meshy re-paints the photo: skin `#D98A50` vs the photo's `#C98250`.
+- **Rigid projection fails.** Silhouette registration (scale/shift, IoU) reached **0.959**, yet
+  painting the photo through it ghosted the glasses and put skin on mom's hair. Measured: internal
+  features sit a **median 29 px, p90 56 px** from where the photo has them — image-to-3D doesn't
+  rebuild the picture pixel-for-pixel, only its outline.
+- **Fix: dense optical flow** (OpenCV DIS, CLAHE greyscale) from a front render of the model's
+  *own* texture to the photo. The texture is aligned to its geometry and resembles the photo, so the
+  flow recovers per-pixel correspondence: grey NCC **0.58 → 0.90** (family_a 0.73 → 0.93).
+- **Three guards it needed:**
+  1. forward-backward flow check (<3 px) — occlusion edges (baby's hand over mom's arm) otherwise
+     painted skin on navy. Keeps ~51-54% of visible verts; the rest fall back to texture.
+  2. `--texture-decides navy/black` — fold shadows in the photo made navy black. Same family as
+     EXP-022; the photo has the shading problem too, just less of it.
+  3. `--keep-small cream=400` + "must touch black" — photo forehead shine snapped to cream. Eye
+     whites touch a pupil, shine touches only skin; that one rule separates them.
+- **Visibility via Blender** (`blender_visibility.py`, BVH ray cast toward the camera): ~2 s for
+  1.3M faces, exact. Photo colour only where the normal faces the camera by cos > 0.3.
+- **Blender render gotcha:** OBJ `Kd` is sRGB but Blender's Base Color is linear — unconverted,
+  navy `#282D48` rendered ~`#6B7290`. `blender_render_colored.py` linearises it.
+- **Also:** Meshy GLBs had 60-75k "open edges" and hundreds of "bodies" — all UV-seam vertex
+  splits. `merge_vertices()` → strictly watertight single body; no remesh/convert needed.
+- **Result:** both busts watertight, 5 filaments, faces/glasses/eyes in the right place, photo skin
+  tone. family_a's tee back is wrong in Meshy's texture itself (navy + blue band) — no photo sees
+  the back, so projection cannot help; flagged, family_b shipped.
+- **Decision:** `scripts/photo_project_colorize.py` is the path when the approved render exists and
+  colour fidelity matters. Never project without the flow step.
+
 ### EXP-NNN — <title>  (<date>)
 - **Hypothesis:**
 - **Setup:**
