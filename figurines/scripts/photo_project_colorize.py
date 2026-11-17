@@ -158,12 +158,22 @@ def bilinear(img, c, r):
             + img[r0 + 1, c0] * (1 - fc) * fr + img[r0 + 1, c0 + 1] * fc * fr)
 
 
+def black_slot(palette, max_chroma=12.0):
+    """The 'black' filament: darkest NEUTRAL slot. Plain argmin(L) is wrong when a dark chromatic
+    filament (navy at L 8.4) is darker than the black one (L 9.7) — the chroma gate then evicts the
+    navy into black. Falls back to argmin(L) when no slot is neutral."""
+    lab = srgb_to_lab(palette)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    L = np.where(chroma < max_chroma, lab[:, 0], np.inf)
+    return int(np.argmin(L)) if np.isfinite(L).any() else int(np.argmin(lab[:, 0]))
+
+
 def snap(col, palette, cs, lw, black_chroma):
     """Nearest palette slot, with the darkest slot gated on low chroma (EXP-022)."""
     lab = srgb_to_lab(col)
     lbl = assign_nearest(to_feature(col, cs, lw), to_feature(palette, cs, lw))
     if black_chroma > 0:
-        dark = int(np.argmin(srgb_to_lab(palette)[:, 0]))
+        dark = black_slot(palette)
         keep = [i for i in range(len(palette)) if i != dark]
         alt = np.array(keep)[assign_nearest(to_feature(col, cs, lw), to_feature(palette[keep], cs, lw))]
         lbl = np.where((lbl == dark) & (np.hypot(lab[:, 1], lab[:, 2]) >= black_chroma), alt, lbl)
@@ -213,6 +223,9 @@ def main():
     ap.add_argument("--texture-decides", action="append", default=[], metavar="#A/#B",
                     help="two palette colours the photo can't separate (e.g. navy vs black in "
                          "shadow): where photo and texture disagree between them, texture wins")
+    ap.add_argument("--hidden-near", action="append", default=[], metavar="#HEX=MM",
+                    help="hidden (photo can't see) verts may take HEX only within MM of a "
+                         "photo-coloured HEX vert — stops the texture inventing a colour elsewhere")
     ap.add_argument("--keep-small", action="append", default=[], metavar="#HEX=N",
                     help="faces turned HEX by the photo against the texture survive only in "
                          "pieces of <=N faces that touch the darkest slot (keeps eye whites, "
@@ -323,6 +336,29 @@ def main():
         plab = np.where(swap, tl, plab)
         print(f"Texture decides {spec}: {int(swap.sum()):,} photo verts deferred to texture")
     vlabel[use_photo] = plab
+
+    # a colour the photo only shows in one place (baby's light-blue sleeves) must not appear on
+    # hidden surfaces far from there: that is the texture inventing it (Tripo painted a grey
+    # gradient on dad's back that snaps to light blue). Hidden verts may keep slot S only within
+    # R mm of a photo-coloured vert of slot S; otherwise they re-snap among the other slots.
+    for spec in args.hidden_near:
+        hexc, _, r_s = spec.partition("=")
+        t, rad = slot_of(palette, hexc), float(r_s)
+        seen_t = V[use_photo & (vlabel == t)]
+        cand = (~use_photo) & (vlabel == t)
+        if not cand.any():
+            continue
+        far = cand.copy()
+        if len(seen_t):
+            d, _ = cKDTree(seen_t).query(V[cand], k=1)
+            far[cand] = d > rad
+        keep = [i for i in range(len(palette)) if i != t]
+        vlabel[far] = np.array(keep)[snap(vcol[far], tpal[keep], args.color_space, args.luma_weight,
+                                          args.texture_black_chroma)]
+        tlabel[far] = vlabel[far]  # these verts are hidden, so this IS their texture baseline now
+        #                            (--keep-small compares against tlabel; stale = reverted back)
+        print(f"Hidden-near {hexc}<={rad}mm: {int(far.sum()):,} hidden verts re-snapped "
+              f"(kept {int((cand & ~far).sum()):,} near what the photo shows)")
     print(f"Photo-coloured verts: {int(use_photo.sum()):,} ({100 * use_photo.mean():.1f}%); "
           f"texture fallback: {int((~use_photo).sum()):,}")
     # for --open re-snapping: each vertex's colour in photo space where we have it
@@ -353,7 +389,7 @@ def main():
             sizes = np.bincount(comp[cand])
             big = cand & (sizes[np.where(cand, comp, 0)] > nmax) if len(sizes) else cand & False
             # an eye white touches a pupil; forehead shine touches only skin
-            dark = int(np.argmin(srgb_to_lab(palette)[:, 0]))
+            dark = black_slot(palette)
             touch = np.zeros(comp.max() + 1, bool)
             for x, y in ((adj[:, 0], adj[:, 1]), (adj[:, 1], adj[:, 0])):
                 hit = cand[x] & (face_idx[y] == dark)
