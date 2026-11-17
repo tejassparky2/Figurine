@@ -1,0 +1,2 @@
+- [Figurine color export](project_figurine_color_export.md) — Tripo convert_model params for colored 3MF, not yet integrated
+- [Render pipeline](project_render_pipeline.md) — Photo-to-render automation using fal.ai (BG removal, GPT-image-2, spectacles detection)

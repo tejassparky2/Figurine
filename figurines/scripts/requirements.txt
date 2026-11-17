@@ -1,0 +1,3 @@
+requests
+trimesh
+numpy

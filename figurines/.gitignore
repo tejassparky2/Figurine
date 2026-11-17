@@ -1,0 +1,13 @@
+images*/
+output*/
+renders/
+
+# Working data (large, not for git)
+projects/
+archive/
+.claude/worktrees/
+
+# Loose source/input images in figurines/ root
+/*.jpeg
+/*.jpg
+/*.png

@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Data
+data/
+
+# Watermarked output
+*_watermarked.*
+*_before_after.*
+.gstack/
+
+# Generated order output (meshes/renders — regenerate from the .scad files)
+orders/
+piggybank_orders/
+meshfix/
+.vercel/
