@@ -2,6 +2,11 @@
 
     blender -b --factory-startup --python scripts/blender_props_barista.py -- base.npz out.npz \
         [--top 30] [--machine-at 33,7] [--sack-at -33,4] [--blend out.blend]
+        [--machine-out machine.npz [--pocket 1.2] [--clearance 0.2]]
+
+With --machine-out the machine is NOT fused: it is written as its own part (flat bottom at z = 0)
+and a pocket (--pocket deep, --clearance per side) is cut in the base top to glue it into. Use this
+when the whole set needs more filaments than the printer has heads.
 
 base.npz comes from blender_make_name_base.py (V, F, M; materials 0 base, 1 plaque, 2 text).
 Adds, standing on the flat top (z = --top, front = -Y):
@@ -24,13 +29,16 @@ from mathutils import Matrix, Vector
 
 argv = sys.argv[sys.argv.index("--") + 1:]
 src, out = argv[0], argv[1]
-opt = {"--top": "30", "--machine-at": "33,7", "--sack-at": "-33,4", "--blend": None}
+opt = {"--top": "30", "--machine-at": "33,7", "--sack-at": "-33,4", "--blend": None, "--machine-out": None,
+       "--pocket": "1.2", "--clearance": "0.2"}
 for i, a in enumerate(argv[2:]):
     if a in opt:
         opt[a] = argv[2:][i + 1]
 TOP = float(opt["--top"])
 MX, MY = map(float, opt["--machine-at"].split(","))
 SX, SY = map(float, opt["--sack-at"].split(","))
+SEPARATE = opt["--machine-out"] is not None      # machine printed on its own, glued into a pocket
+POCKET, CLEAR = float(opt["--pocket"]), float(opt["--clearance"])
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
@@ -164,7 +172,8 @@ scene.collection.objects.link(base)
 # ---------------------------------------------------------------- espresso machine (local frame)
 W, D, HM = 27.0, 22.0, 38.0
 FY = -D / 2                                   # front face
-mach = to_object("machine", box(-W / 2, W / 2, -D / 2, D / 2, -0.6, HM, bevel=1.0), BLACK)
+ZB = -POCKET if SEPARATE else -0.6           # body bottom (sits in the pocket when separate)
+mach = to_object("machine", box(-W / 2, W / 2, -D / 2, D / 2, ZB, HM, bevel=1.0), BLACK)
 boolean(mach, to_object("recess", box(-10.5, 10.5, FY - 1, FY + 8, 4.5, 21.0), GREY), "DIFFERENCE")
 parts = []
 parts.append((box(-10.5, 10.5, FY - 1.2, FY + 8.5, 3.9, 5.6, bevel=0.4), GREY))           # drip tray
@@ -190,37 +199,98 @@ parts.append((torus(1.25, 0.5, Matrix.Translation((3.6, FY + 3.6, 7.8)) @ Matrix
 for k, (bm, mat) in enumerate(parts):
     boolean(mach, to_object(f"p{k}", bm, mat))
 
-bm = bmesh.new(); bm.from_mesh(mach.data)
-place(bm, MX, MY, TOP)
-bm.to_mesh(mach.data); bm.free()
-boolean(base, mach)
+def export(ob, path, dz=0.0):
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
+    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=1e-5)
+    bmesh.ops.triangulate(bm, faces=bm.faces)
+    # drop zero-volume slivers the boolean can leave between touching beans
+    seen, junk = set(), []
+    for f0 in bm.faces:
+        if f0.index in seen:
+            continue
+        isl, stack = [], [f0]
+        seen.add(f0.index)
+        while stack:
+            f = stack.pop(); isl.append(f)
+            for e in f.edges:
+                for g in e.link_faces:
+                    if g.index not in seen:
+                        seen.add(g.index); stack.append(g)
+        vol = sum(f.verts[0].co.dot(f.verts[1].co.cross(f.verts[2].co)) for f in isl) / 6
+        if abs(vol) < 0.05:
+            junk += isl
+    if junk:
+        print(f"[props] removed {len(junk)} faces of zero-volume slivers")
+        bmesh.ops.delete(bm, geom=junk, context="FACES")
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
+    bm.verts.index_update(); bm.faces.index_update()
+    V = np.array([v.co[:] for v in bm.verts]) + [0, 0, dz]
+    F = np.array([[v.index for v in f.verts] for f in bm.faces], np.int64)
+    M = np.array([f.material_index for f in bm.faces], np.int64)
+    bm.free()
+    np.savez(path, V=V, F=F, M=M)
+    return V, F, M
+
+
+if SEPARATE:
+    Vm, Fm, Mm = export(mach, opt["--machine-out"], dz=POCKET)        # own print, flat bottom at z = 0
+    print(f"[props] machine part {len(Fm)} faces, {Vm.min(0).round(2).tolist()} .. {Vm.max(0).round(2).tolist()}"
+          f" -> {opt['--machine-out']} (assembled: shift by {MX}, {MY}, {TOP - POCKET})")
+    bpy.data.objects.remove(mach)
+    c = CLEAR
+    boolean(base, to_object("pocket", box(MX - W / 2 - c, MX + W / 2 + c, MY - D / 2 - c, MY + D / 2 + c,
+                                          TOP - POCKET, TOP + 5), BASE), "DIFFERENCE")
+else:
+    bm = bmesh.new(); bm.from_mesh(mach.data)
+    place(bm, MX, MY, TOP)
+    bm.to_mesh(mach.data); bm.free()
+    boolean(base, mach)
 
 # ---------------------------------------------------------------- coffee sack (local frame)
-prof = [(9.5, 0.0), (10.8, 0.4), (11.6, 1.2), (12.6, 3.5), (13.3, 6.5), (13.5, 9.5), (13.2, 13.0),
-        (12.4, 16.5), (11.6, 19.2), (11.4, 20.5), (12.3, 21.3), (12.8, 22.3), (12.6, 23.3), (11.8, 23.9),
-        (10.8, 23.9), (10.1, 23.3), (9.8, 22.6), (8.0, 22.8), (5.0, 23.1), (2.0, 23.3)]
-prof = resample(prof, 0.3)
+# Squat burlap sack as in the art: wide flat bottom with a big rounded corner, near-vertical sides,
+# a pinch under a thick rolled cuff, diagonal woven ribs, and a heaped dome of large beans.
+prof = [(10.0, 0.0), (11.6, 0.4), (12.6, 1.3), (13.3, 2.8), (13.7, 5.0), (13.8, 7.5), (13.6, 10.5),
+        (13.2, 13.2), (12.8, 15.3), (12.6, 16.4), (13.4, 17.1), (14.2, 18.0), (14.6, 19.5), (14.6, 21.0),
+        (14.2, 22.4), (13.4, 23.4), (12.3, 24.0), (11.2, 24.1), (10.4, 23.8), (9.9, 23.2), (9.6, 22.6),
+        (8.0, 23.5), (6.0, 24.3), (4.0, 24.8), (2.0, 25.1)]
+BED = [(9.6, 22.6), (8.0, 23.5), (6.0, 24.3), (4.0, 24.8), (2.0, 25.1), (0.0, 25.15)]
+prof = resample(prof, 0.25)
+RIB_N, RIB_K = 69, 2 * math.pi * 0.57             # diagonal ribs: ~1 mm pitch at 35 degrees
+
+
+def bed_z(r):
+    for (r0, z0), (r1, z1) in zip(BED[:-1], BED[1:]):
+        if r1 <= r <= r0:
+            return z0 + (z1 - z0) * (r0 - r) / (r0 - r1)
+    return BED[-1][1]
 
 
 def sack_r(th, r, z):
-    fold = 1 + 0.035 * math.sin(4 * th + 0.25 * z) + 0.02 * math.sin(7 * th + 1.3)
-    weave = 0.16 * math.sin(th * 60) * math.sin(2 * math.pi * z / 1.3) if 0.8 < z < 21.0 else 0.0   # folds scale every ring alike (no self-crossing)
-    return r * fold + weave
+    fold = 1 + 0.025 * math.sin(3 * th + 0.2 * z) + 0.015 * math.sin(7 * th + 1.3)
+    dent = 0.55 * math.exp(-((math.atan2(math.sin(th - 2.6), math.cos(th - 2.6))) ** 2) / 0.08) \
+        * math.exp(-((z - 11.0) / 4.0) ** 2)       # one soft fold on the left side
+    rib = 0.12 * math.sin(RIB_N * th + RIB_K * z) if (0.9 < z < 23.6 and not (r < 9.95 and z > 22.4)) else 0.0
+    return r * fold - dent + rib
 
 
-sack = to_object("sack", revolve(prof, 240, sack_r, lambda r, z: BEANS if (r < 9.85 and z > 22.0) else TAN))
-rng = random.Random(7)
+sack = to_object("sack", revolve(prof, 360, sack_r, lambda r, z: BEANS if (r < 9.65 and z > 22.4) else TAN))
+rng = random.Random(11)
 beans = bmesh.new()
-for k in range(30):
-    rr = 8.6 * math.sqrt(rng.random())
+placed = []
+while len(placed) < 40:
+    rr = 8.8 * math.sqrt(rng.random())
     th = rng.random() * 2 * math.pi
     x, y = rr * math.cos(th), rr * math.sin(th)
-    zb = 22.75 + 0.5 * (1 - (rr / 9.8) ** 2) + 0.3          # each bean sunk ~0.4 mm into the bed
+    if any((x - a) ** 2 + (y - b) ** 2 < 2.1 ** 2 for a, b in placed):
+        continue
+    placed.append((x, y))
     tmp = bmesh.new()
-    bmesh.ops.create_uvsphere(tmp, u_segments=16, v_segments=10, radius=1.0)
-    bmesh.ops.scale(tmp, vec=(1.35, 0.95, 0.7), verts=tmp.verts)
-    bmesh.ops.transform(tmp, matrix=Matrix.Translation((x, y, zb)) @ Matrix.Rotation(rng.random() * math.pi, 4, "Z")
-                        @ Matrix.Rotation(rng.uniform(-0.4, 0.4), 4, "X"), verts=tmp.verts)
+    bmesh.ops.create_uvsphere(tmp, u_segments=18, v_segments=10, radius=1.0)
+    bmesh.ops.scale(tmp, vec=(1.7, 1.15, 0.8), verts=tmp.verts)
+    bmesh.ops.transform(tmp, matrix=Matrix.Translation((x, y, bed_z(rr) + 0.3)) @ Matrix.Rotation(rng.random() * math.pi, 4, "Z")
+                        @ Matrix.Rotation(rng.uniform(-0.35, 0.35), 4, "X"), verts=tmp.verts)
     me_t = bpy.data.meshes.new("bt"); tmp.to_mesh(me_t); tmp.free()
     beans.from_mesh(me_t); bpy.data.meshes.remove(me_t)
 boolean(sack, to_object("beans", beans, BEANS), self_overlap=True)
@@ -230,16 +300,7 @@ bm.to_mesh(sack.data); bm.free()
 boolean(base, sack)
 
 # ---------------------------------------------------------------- export
-bm = bmesh.new()
-bm.from_mesh(base.data)
-bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
-bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=1e-5)
-bmesh.ops.triangulate(bm, faces=bm.faces)
-V = np.array([v.co[:] for v in bm.verts])
-F = np.array([[v.index for v in f.verts] for f in bm.faces], np.int64)
-M = np.array([f.material_index for f in bm.faces], np.int64)
-bm.free()
-np.savez(out, V=V, F=F, M=M)
+V, F, M = export(base, out)
 if opt["--blend"]:
     bpy.ops.wm.save_as_mainfile(filepath=opt["--blend"])
 print(f"[props] {len(V)} verts, {len(F)} faces; per material {np.bincount(M, minlength=8).tolist()} -> {out}")
