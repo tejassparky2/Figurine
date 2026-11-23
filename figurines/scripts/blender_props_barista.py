@@ -30,7 +30,7 @@ from mathutils import Matrix, Vector
 argv = sys.argv[sys.argv.index("--") + 1:]
 src, out = argv[0], argv[1]
 opt = {"--top": "30", "--machine-at": "33,7", "--sack-at": "-33,4", "--blend": None, "--machine-out": None,
-       "--pocket": "1.2", "--clearance": "0.2"}
+       "--pocket": "1.2", "--clearance": "0.2", "--scale": "1.0", "--feet": None, "--feet-depth": "1.5", "--seed": "11"}
 for i, a in enumerate(argv[2:]):
     if a in opt:
         opt[a] = argv[2:][i + 1]
@@ -39,6 +39,7 @@ MX, MY = map(float, opt["--machine-at"].split(","))
 SX, SY = map(float, opt["--sack-at"].split(","))
 SEPARATE = opt["--machine-out"] is not None      # machine printed on its own, glued into a pocket
 POCKET, CLEAR = float(opt["--pocket"]), float(opt["--clearance"])
+SC = float(opt["--scale"])                       # props are modelled at 1.0 and scaled as a whole
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 scene = bpy.context.scene
@@ -172,7 +173,7 @@ scene.collection.objects.link(base)
 # ---------------------------------------------------------------- espresso machine (local frame)
 W, D, HM = 27.0, 22.0, 38.0
 FY = -D / 2                                   # front face
-ZB = -POCKET if SEPARATE else -0.6           # body bottom (sits in the pocket when separate)
+ZB = (-POCKET if SEPARATE else -0.6) / SC          # body bottom (sits in the pocket when separate)
 mach = to_object("machine", box(-W / 2, W / 2, -D / 2, D / 2, ZB, HM, bevel=1.0), BLACK)
 boolean(mach, to_object("recess", box(-10.5, 10.5, FY - 1, FY + 8, 4.5, 21.0), GREY), "DIFFERENCE")
 parts = []
@@ -202,8 +203,8 @@ for k, (bm, mat) in enumerate(parts):
 def export(ob, path, dz=0.0):
     bm = bmesh.new()
     bm.from_mesh(ob.data)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-4)
-    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=1e-5)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=1e-6)
+    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=1e-4)
     bmesh.ops.triangulate(bm, faces=bm.faces)
     # drop zero-volume slivers the boolean can leave between touching beans
     seen, junk = set(), []
@@ -234,6 +235,10 @@ def export(ob, path, dz=0.0):
     return V, F, M
 
 
+bm = bmesh.new(); bm.from_mesh(mach.data)
+bmesh.ops.scale(bm, vec=(SC, SC, SC), verts=bm.verts)
+bm.to_mesh(mach.data); bm.free()
+W, D = W * SC, D * SC
 if SEPARATE:
     Vm, Fm, Mm = export(mach, opt["--machine-out"], dz=POCKET)        # own print, flat bottom at z = 0
     print(f"[props] machine part {len(Fm)} faces, {Vm.min(0).round(2).tolist()} .. {Vm.max(0).round(2).tolist()}"
@@ -276,11 +281,11 @@ def sack_r(th, r, z):
 
 
 sack = to_object("sack", revolve(prof, 360, sack_r, lambda r, z: BEANS if (r < 9.65 and z > 22.4) else TAN))
-rng = random.Random(11)
+rng = random.Random(int(opt["--seed"]))
 beans = bmesh.new()
 placed = []
-while len(placed) < 40:
-    rr = 8.8 * math.sqrt(rng.random())
+while len(placed) < 32:
+    rr = 7.6 * math.sqrt(rng.random())          # beans stay off the rim wall (no tangent contacts)
     th = rng.random() * 2 * math.pi
     x, y = rr * math.cos(th), rr * math.sin(th)
     if any((x - a) ** 2 + (y - b) ** 2 < 2.1 ** 2 for a, b in placed):
@@ -295,11 +300,28 @@ while len(placed) < 40:
     beans.from_mesh(me_t); bpy.data.meshes.remove(me_t)
 boolean(sack, to_object("beans", beans, BEANS), self_overlap=True)
 bm = bmesh.new(); bm.from_mesh(sack.data)
+bmesh.ops.scale(bm, vec=(SC, SC, SC), verts=bm.verts)
 place(bm, SX, SY, TOP - 0.5)
 bm.to_mesh(sack.data); bm.free()
 boolean(base, sack)
 
 # ---------------------------------------------------------------- export
+# ---------------------------------------------------------------- foot pockets for the figure
+if opt["--feet"]:
+    import json
+    fd = float(opt["--feet-depth"])
+    for k, poly in enumerate(json.load(open(opt["--feet"]))):
+        fb = bmesh.new()
+        vs = [fb.verts.new((x, y, TOP - fd)) for x, y in poly]
+        f = fb.faces.new(vs)
+        if f.normal.z > 0:
+            f.normal_flip()
+        ext = bmesh.ops.extrude_face_region(fb, geom=[f])
+        bmesh.ops.translate(fb, verts=[g for g in ext["geom"] if isinstance(g, bmesh.types.BMVert)], vec=(0, 0, fd + 5))
+        bmesh.ops.triangulate(fb, faces=fb.faces)
+        boolean(base, to_object(f"foot{k}", fb, BASE), "DIFFERENCE")
+    print(f"[props] cut {k + 1} foot pockets, {fd} mm deep")
+
 V, F, M = export(base, out)
 if opt["--blend"]:
     bpy.ops.wm.save_as_mainfile(filepath=opt["--blend"])
